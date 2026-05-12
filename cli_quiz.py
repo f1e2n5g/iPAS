@@ -157,6 +157,63 @@ def parse_files(directory):
     return questions
 
 
+def parse_mock_txt_files(directory):
+    questions = []
+    explanations = {}
+    
+    for filepath in glob.glob(os.path.join(directory, '*_解析版.txt')):
+        filename = os.path.basename(filepath)
+        category = "模擬試題" 
+        
+        with open(filepath, 'r', encoding='utf-8') as f:
+            content = f.read()
+            
+        content = "\n" + content
+        blocks = re.split(r'\n(?=\d+\.\s)', content)
+        
+        for block in blocks:
+            block = block.strip()
+            if not block:
+                continue
+                
+            q_match = re.search(r'^(\d+)\.\s+(.*?)\n([A-D])\.', block, re.DOTALL)
+            if not q_match:
+                continue
+            
+            q_num = q_match.group(1)
+            q_text = q_match.group(2).strip()
+            
+            options = {}
+            for opt in ['A', 'B', 'C', 'D']:
+                opt_match = re.search(fr'^{opt}\.\s+(.*?)(?=\n[A-D]\.|\n(?:解答|【正確答案】))', block, re.MULTILINE | re.DOTALL)
+                if opt_match:
+                    options[opt] = opt_match.group(1).strip()
+            
+            ans_match = re.search(r'(?:解答|【正確答案】)[：\s]*([A-D])', block)
+            answer = ans_match.group(1) if ans_match else ""
+            
+            exp_match = re.search(r'(?:解析|【解析】)[：\n]*(.*)', block, re.DOTALL)
+            explanation = exp_match.group(1).strip() if exp_match else ""
+            
+            q_obj = {
+                'id': f"{filename}_{q_num}",
+                'category': category,
+                'source': filename,
+                'number': q_num,
+                'answer': answer,
+                'question': q_text,
+                'options': options
+            }
+            if answer and len(options) == 4:
+                questions.append(q_obj)
+            
+            if explanation:
+                key = _match_key(q_text)[:22]
+                explanations[key] = (explanation, None)
+                
+    return questions, explanations
+
+
 def load_wrong_questions(filepath):
     if os.path.exists(filepath):
         try:
@@ -626,6 +683,13 @@ def main():
         all_questions = parse_files(past_exams_dir)
         wrong_dict = load_wrong_questions(wrong_file_path)
         explanations = load_explanations(*explanation_sources)
+        
+        # Add mock exams
+        mock_exams_dir = os.path.join(script_dir, '同學分享')
+        mock_questions, mock_explanations = parse_mock_txt_files(mock_exams_dir)
+        all_questions.extend(mock_questions)
+        explanations.update(mock_explanations)
+        
         categories = sorted(set(q['category'] for q in all_questions))
         covered = sum(1 for q in all_questions if lookup_explanation(explanations, q['question']))
 
@@ -644,6 +708,7 @@ def main():
                 value="3",
                 disabled=("no records" if not wrong_dict else False),
             ),
+            questionary.Choice("Mock Exam (模擬考)    ·  Take a 50-question simulated exam", value="mock"),
             questionary.Separator(),
             questionary.Choice("Quit", value="4"),
         ]
@@ -692,6 +757,106 @@ def main():
         elif choice == '3':
             if wrong_dict:
                 run_quiz(list(wrong_dict.values()), wrong_dict, wrong_file_path, explanations, is_review=True)
+
+        elif choice == 'mock':
+            mock_v1_path = os.path.join(script_dir, 'mock_bank.json')
+            mock_v2_path = os.path.join(script_dir, 'mock_bank_v2.json')
+
+            if not os.path.exists(mock_v1_path):
+                console.print(f"\n[bold {C_PRIMARY}]首次執行模擬考，正在根據課綱自動生成第一批模擬題庫...[/]")
+                try:
+                    import mock_generator
+                    mock_generator.generate_mock_bank(mock_v1_path)
+                except Exception as e:
+                    console.print(f"[bold {C_ERROR}]生成失敗：{e}[/]")
+                    input("按 Enter 繼續...")
+                    continue
+
+            if not os.path.exists(mock_v2_path):
+                console.print(f"\n[bold {C_PRIMARY}]偵測到尚未生成第二批模擬題庫，正在自動生成...[/]")
+                try:
+                    import mock_generator_v2
+                    mock_generator_v2.generate_mock_bank_v2(mock_v1_path, mock_v2_path)
+                except Exception as e:
+                    console.print(f"[bold {C_WARN}]第二批題庫生成失敗（可忽略）：{e}[/]")
+
+            with open(mock_v1_path, 'r', encoding='utf-8') as f:
+                mock_v1 = json.load(f)
+
+            mock_v2 = []
+            if os.path.exists(mock_v2_path):
+                with open(mock_v2_path, 'r', encoding='utf-8') as f:
+                    mock_v2 = json.load(f)
+
+            bank_choices = [
+                questionary.Choice(f"第一批題庫 ({len(mock_v1)} 題)        ·  初始 55 概念", value="v1"),
+            ]
+            if mock_v2:
+                bank_choices.append(
+                    questionary.Choice(f"第二批題庫 ({len(mock_v2)} 題)        ·  新增 125 概念", value="v2"),
+                )
+                bank_choices.append(
+                    questionary.Choice(f"全部混合 ({len(mock_v1) + len(mock_v2)} 題)        ·  V1 + V2 一起抽", value="all"),
+                )
+            bank_choices.append(questionary.Separator())
+            bank_choices.append(questionary.Choice("返回", value="Q"))
+
+            clear_screen()
+            render_topbar()
+            render_screen_header("Mock Exam (模擬考)", "Step 1 · 選擇題庫版本")
+
+            bank_choice = questionary.select(
+                "選擇題庫",
+                choices=bank_choices,
+                use_indicator=False,
+                qmark="▸",
+                pointer="▸",
+                style=Q_STYLE,
+            ).ask()
+
+            if not bank_choice or bank_choice == 'Q':
+                continue
+
+            if bank_choice == 'v1':
+                bank = mock_v1
+            elif bank_choice == 'v2':
+                bank = mock_v2
+            else:
+                bank = mock_v1 + mock_v2
+
+            sub1_count = sum(1 for q in bank if q['category'] == "人工智慧基礎概論")
+            sub2_count = sum(1 for q in bank if q['category'] == "生成式AI應用與規劃")
+
+            mock_choices = [
+                questionary.Choice(f"科目一：人工智慧基礎概論 ({sub1_count} 題池，抽 50 題)", value="sub1"),
+                questionary.Choice(f"科目二：生成式AI應用與規劃 ({sub2_count} 題池，抽 50 題)", value="sub2"),
+                questionary.Separator(),
+                questionary.Choice("返回", value="Q")
+            ]
+
+            clear_screen()
+            render_topbar()
+            render_screen_header("Mock Exam (模擬考)", "Step 2 · 選擇科目")
+
+            mock_sub = questionary.select(
+                "選擇科目",
+                choices=mock_choices,
+                use_indicator=False,
+                qmark="▸",
+                pointer="▸",
+                style=Q_STYLE,
+            ).ask()
+
+            if not mock_sub or mock_sub == 'Q':
+                continue
+
+            if mock_sub == 'sub1':
+                pool = [q for q in bank if q['category'] == "人工智慧基礎概論"]
+            else:
+                pool = [q for q in bank if q['category'] == "生成式AI應用與規劃"]
+
+            exam_q = random.sample(pool, min(50, len(pool)))
+            run_quiz(exam_q, wrong_dict, wrong_file_path, explanations, is_review=False)
 
         elif choice == '4' or choice is None:
             clear_screen()
